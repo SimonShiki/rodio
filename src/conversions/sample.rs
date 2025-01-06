@@ -1,4 +1,4 @@
-use cpal::{FromSample, Sample as CpalSample};
+use dasp_sample::{FromSample, Sample as DaspSample};
 use std::marker::PhantomData;
 
 /// Converts the samples data type to `O`.
@@ -41,7 +41,7 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<O> {
-        self.input.next().map(|s| CpalSample::from_sample(s))
+        self.input.next().map(|s| DaspSample::from_sample(s))
     }
 
     #[inline]
@@ -71,16 +71,19 @@ where
 ///
 /// You can implement this trait on your own type as well if you wish so.
 ///
-pub trait Sample: CpalSample {
+pub trait Sample: DaspSample {
     /// Linear interpolation between two samples.
     ///
-    /// The result should be equal to
-    /// `first * numerator / denominator + second * (1 - numerator / denominator)`.
+    /// The result should be equivalent to
+    /// `first * (1 - numerator / denominator) + second * numerator / denominator`.
+    ///
+    /// To avoid numeric overflows pick smaller numerator.
     fn lerp(first: Self, second: Self, numerator: u32, denominator: u32) -> Self;
+
     /// Multiplies the value of this sample by the given amount.
     fn amplify(self, value: f32) -> Self;
 
-    /// Converts the sample to an f32 value.
+    /// Converts the sample to a f32 value.
     fn to_f32(self) -> f32;
 
     /// Calls `saturating_add` on the sample.
@@ -176,5 +179,64 @@ impl Sample for f32 {
     #[inline]
     fn zero_value() -> f32 {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use num_rational::Ratio;
+    use quickcheck::{quickcheck, TestResult};
+
+    #[test]
+    fn lerp_u16_constraints() {
+        let a = 12u16;
+        let b = 31u16;
+        assert_eq!(Sample::lerp(a, b, 0, 1), a);
+        assert_eq!(Sample::lerp(a, b, 1, 1), b);
+
+        assert_eq!(Sample::lerp(0, u16::MAX, 0, 1), 0);
+        assert_eq!(Sample::lerp(0, u16::MAX, 1, 1), u16::MAX);
+        // Zeroes
+        assert_eq!(Sample::lerp(0u16, 0, 0, 1), 0);
+        assert_eq!(Sample::lerp(0u16, 0, 1, 1), 0);
+        // Downward changes
+        assert_eq!(Sample::lerp(1u16, 0, 0, 1), 1);
+        assert_eq!(Sample::lerp(1u16, 0, 1, 1), 0);
+    }
+
+    #[test]
+    fn lerp_i16_constraints() {
+        let a = 12i16;
+        let b = 31i16;
+        assert_eq!(Sample::lerp(a, b, 0, 1), a);
+        assert_eq!(Sample::lerp(a, b, 1, 1), b);
+
+        assert_eq!(Sample::lerp(0, i16::MAX, 0, 1), 0);
+        assert_eq!(Sample::lerp(0, i16::MAX, 1, 1), i16::MAX);
+        assert_eq!(Sample::lerp(0, i16::MIN, 1, 1), i16::MIN);
+        // Zeroes
+        assert_eq!(Sample::lerp(0u16, 0, 0, 1), 0);
+        assert_eq!(Sample::lerp(0u16, 0, 1, 1), 0);
+        // Downward changes
+        assert_eq!(Sample::lerp(a, i16::MIN, 0, 1), a);
+        assert_eq!(Sample::lerp(a, i16::MIN, 1, 1), i16::MIN);
+    }
+
+    quickcheck! {
+        fn lerp_u16_random(first: u16, second: u16, numerator: u16, denominator: u16) -> TestResult {
+            if denominator == 0 { return TestResult::discard(); }
+
+            let (numerator, denominator) = Ratio::new(numerator, denominator).into_raw();
+            if numerator > 5000 { return TestResult::discard(); }
+
+            let a = first as f64;
+            let b = second as f64;
+            let c = numerator as f64 / denominator as f64;
+            if c < 0.0 || c > 1.0 { return TestResult::discard(); };
+            let reference = a * (1.0 - c) + b * c;
+            let x = Sample::lerp(first, second, numerator as u32, denominator as u32) as f64;
+            TestResult::from_bool((x - reference).abs() < 1.0)
+        }
     }
 }
